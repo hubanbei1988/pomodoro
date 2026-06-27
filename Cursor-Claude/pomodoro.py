@@ -14,12 +14,11 @@ Python + tkinter 实现，零外部依赖，双击即可运行
 """
 
 import tkinter as tk
-from tkinter import messagebox, Menu
+from tkinter import ttk, messagebox, Menu
 import json
 import os
 import sys
 import math
-import subprocess
 import winsound
 import ctypes
 import struct
@@ -53,7 +52,6 @@ C = {
     "green":      "#2ecc71",  # 短休息环色
     "blue":       "#3498db",  # 长休息环色
     "orange":     "#f39c12",  # 暂停状态色
-    "orange_hover":"#f5b042",  # 暂停悬停色
     "btn_bg":     "#252545",  # 次要按钮背景
     "btn_hover":  "#333366",  # 按钮悬停
     "dot_pending":"#444444",  # 未完成圆点
@@ -109,6 +107,9 @@ $texts[1].AppendChild($template.CreateTextNode("{message}")) > $null
 $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("{APP_NAME}")
 $notifier.Show($template)
 '''
+        startup = ctypes.windll.kernel32.GetStdHandle(-11)
+        # 此方法在部分系统上可能不可用，用 subprocess 备选
+        import subprocess
         subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps_script],
             capture_output=True, timeout=10,
@@ -139,6 +140,7 @@ def generate_tray_icon() -> Path:
     # ICO 文件头
     # BITMAPINFOHEADER + RGBA pixel data
     pixels = bytearray()
+    cx, cy = size, size // 2  # ICO 内部使用的高度是 2x（兼容性）
     for y in range(size):
         for x in range(size):
             dx = x - size / 2 + 0.5
@@ -310,7 +312,7 @@ class PomodoroApp:
         # ── 刷新显示 ──
         self.update_display()
         self.update_dots()
-        self._update_ring_arc()
+        self.update_ring_color()
 
         # ── 延迟设置托盘（等窗口创建完毕）──
         self.root.after(500, self._init_tray)
@@ -345,6 +347,7 @@ class PomodoroApp:
 
         # 用 Canvas 画圆角矩形背景
         self.tab_btns: dict[str, tk.Label] = {}
+        self.tab_indicators: dict[str, tk.Frame] = {}
         for i, (mode, cfg) in enumerate(DEFAULT_MODES.items()):
             btn = tk.Label(
                 tab_frame,
@@ -449,15 +452,6 @@ class PomodoroApp:
             style="arc", outline=C["ring_bg"],
             width=self.ring_width,
             tags="ring",
-        )
-
-        # 进度弧（初始为空，后续通过 itemconfigure 更新）
-        self.canvas.create_arc(
-            x1, y1, x2, y2,
-            start=90, extent=0,
-            style="arc", outline=C["accent"],
-            width=self.ring_width,
-            tags="progress",
         )
 
         # 时间文字（Canvas 中央）
@@ -607,7 +601,7 @@ class PomodoroApp:
         self.total_time = self.time_left
 
         self._style_tabs()
-        self._update_ring_arc()
+        self.update_ring_color()
         self.update_display()
         self.update_tray()
 
@@ -615,15 +609,10 @@ class PomodoroApp:
     # 显示更新
     # ═══════════════════════════════════════
 
-    @staticmethod
-    def _fmt_time(seconds: int) -> str:
-        """将秒数格式化为 MM:SS 字符串。"""
-        m, s = divmod(seconds, 60)
-        return f"{m:02d}:{s:02d}"
-
     def update_display(self):
         """更新倒计时文字和进度弧。"""
-        time_str = self._fmt_time(self.time_left)
+        m, s = divmod(self.time_left, 60)
+        time_str = f"{m:02d}:{s:02d}"
 
         # 更新 Canvas 上的时间文字
         self.canvas.itemconfigure("time_text", text=time_str)
@@ -645,8 +634,14 @@ class PomodoroApp:
             self.update_tray(f"{time_str} - {mode_label}")
 
     def _update_ring_arc(self):
-        """更新进度弧的 extent 和颜色（通过 itemconfigure 原位更新）。"""
+        """更新进度弧的显示。"""
+        self.canvas.delete("progress")
         progress = self.time_left / self.total_time if self.total_time > 0 else 0
+
+        x1 = self.center - self.ring_radius
+        y1 = self.center - self.ring_radius
+        x2 = self.center + self.ring_radius
+        y2 = self.center + self.ring_radius
 
         # extent 为负表示顺时针方向（从 12 点方向开始）
         extent = -progress * 360
@@ -654,7 +649,17 @@ class PomodoroApp:
             extent = 0  # 剩余不足 1 度时不显示
 
         color = DEFAULT_MODES[self.current_mode]["color"]
-        self.canvas.itemconfigure("progress", extent=extent, outline=color)
+        self.canvas.create_arc(
+            x1, y1, x2, y2,
+            start=90, extent=extent,
+            style="arc", outline=color,
+            width=self.ring_width,
+            tags="progress",
+        )
+
+    def update_ring_color(self):
+        """切换进度环颜色类（由 switch_mode 调用，当前只需重绘弧）。"""
+        self._update_ring_arc()
 
     def update_dots(self):
         """更新 4 个指示灯。"""
@@ -668,7 +673,7 @@ class PomodoroApp:
         """更新主按钮的文本和颜色（自动更新 hover 色）。"""
         if self.is_running:
             self.btn_main._normal_bg = C["orange"]
-            self.btn_main._hover_bg = C["orange_hover"]
+            self.btn_main._hover_bg = "#f5b042"
             self.btn_main.configure(text="⏸", bg=C["orange"])
         else:
             self.btn_main._normal_bg = C["accent"]
@@ -768,15 +773,12 @@ class PomodoroApp:
         """完全退出应用。"""
         self.pause_timer()
         self.save_config()
-        self._saved = True  # 防止 _on_destroy 重复保存
         self._remove_tray()
         self.root.destroy()
         sys.exit(0)
 
     def _on_destroy(self):
         """窗口销毁时的清理（仅非正常退出路径）。"""
-        if getattr(self, '_saved', False):
-            return
         try:
             self.save_config()
         except Exception:
@@ -851,7 +853,8 @@ class PomodoroApp:
         if not self.tray_enabled:
             return
         if tip is None:
-            tip = f"{self._fmt_time(self.time_left)} - {DEFAULT_MODES[self.current_mode]['label']}"
+            m, s = divmod(self.time_left, 60)
+            tip = f"{m:02d}:{s:02d} - {DEFAULT_MODES[self.current_mode]['label']}"
         hwnd = self.root.winfo_id()
         update_tray_tip(hwnd, tip, self._tray_uid)
 
@@ -949,7 +952,7 @@ class PomodoroApp:
                 self._show_toast("✅ 设置已保存")
                 win.destroy()
             except ValueError as e:
-                messagebox.showerror("输入错误", str(e))
+                messagebox.showerror("输入错误", str(e) if str(e) not in ("至少 1 分钟", "最多 120 分钟") else str(e))
 
         btn_frame = tk.Frame(win, bg=C["bg"])
         btn_frame.pack(pady=20)
